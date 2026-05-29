@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DJJ 财务报表 · Financial Reports</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<!-- HyperFormula: cross-sheet formula engine -->
+<script src="https://cdn.jsdelivr.net/npm/hyperformula@2.7.0/dist/hyperformula.full.min.js"></script>
+<!-- Supabase JS SDK -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+:root{
+  --ink:#1a1d29; --ink-soft:#4a4f63; --ink-faint:#8a8fa3;
+  --paper:#f6f4ef; --card:#fffdf9; --line:#e3ddd0; --line-soft:#efe9dd;
+  --accent:#1f5f4f; --accent-soft:#e6f0eb; --gold:#b08442;
+  --pos:#1f7a4d; --neg:#b63b32; --link:#1f5f4f;
+  --shadow:0 1px 2px rgba(26,29,41,.04),0 8px 24px rgba(26,29,41,.06);
+  --sydney:#2d6a8f; --brisbane:#a8581f; --perth:#6a4a8f;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  font-family:'Noto Sans SC',system-ui,sans-serif;
+  background:var(--paper);color:var(--ink);
+  font-size:13px;line-height:1.5;
+  background-image:radial-gradient(circle at 1px 1px,rgba(26,29,41,.025) 1px,transparent 0);
+  background-size:22px 22px;
+}
+.app{display:flex;flex-direction:column;height:100vh;overflow:hidden}
+
+/* ---------- Top bar ---------- */
+.topbar{
+  display:flex;align-items:center;gap:18px;
+  padding:12px 22px;background:var(--card);
+  border-bottom:1px solid var(--line);box-shadow:var(--shadow);z-index:30;
+}
+.brand{display:flex;align-items:baseline;gap:10px}
+.brand .logo{
+  font-family:'Fraunces',serif;font-weight:600;font-size:21px;
+  letter-spacing:-.5px;color:var(--accent);
+}
+.brand .sub{font-size:11px;color:var(--ink-faint);letter-spacing:.5px;text-transform:uppercase}
+.spacer{flex:1}
+
+.month-picker{display:flex;align-items:center;gap:8px}
+.month-picker label{font-size:11px;color:var(--ink-faint);text-transform:uppercase;letter-spacing:.5px}
+select,.btn,input[type=month]{
+  font-family:inherit;font-size:13px;color:var(--ink);
+  background:var(--card);border:1px solid var(--line);
+  border-radius:8px;padding:7px 12px;cursor:pointer;transition:.15s;
+}
+select:hover,.btn:hover,input[type=month]:hover{border-color:var(--accent)}
+.btn{display:inline-flex;align-items:center;gap:6px;font-weight:500}
+.btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.btn.primary:hover{background:#1a4f42}
+.btn.ghost{background:transparent}
+.btn.danger:hover{border-color:var(--neg);color:var(--neg)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+
+.sync-dot{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--ink-faint)}
+.sync-dot .dot{width:7px;height:7px;border-radius:50%;background:var(--ink-faint)}
+.sync-dot.ok .dot{background:var(--pos)}
+.sync-dot.saving .dot{background:var(--gold);animation:pulse 1s infinite}
+.sync-dot.local .dot{background:#9aa}
+.sync-dot.err .dot{background:var(--neg)}
+@keyframes pulse{50%{opacity:.3}}
+
+/* ---------- Tabs ---------- */
+.tabs{
+  display:flex;gap:2px;padding:0 16px;background:var(--card);
+  border-bottom:1px solid var(--line);overflow-x:auto;z-index:20;
+}
+.tab{
+  padding:11px 15px;font-size:12.5px;font-weight:500;color:var(--ink-soft);
+  border:none;background:transparent;cursor:pointer;white-space:nowrap;
+  border-bottom:2.5px solid transparent;transition:.15s;position:relative;
+}
+.tab:hover{color:var(--ink)}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.tab .badge{
+  font-size:9px;padding:1px 5px;border-radius:6px;margin-left:5px;
+  background:var(--line-soft);color:var(--ink-faint);vertical-align:middle;
+  font-family:'IBM Plex Mono',monospace;
+}
+.tab.t-recon.active{color:var(--gold);border-bottom-color:var(--gold)}
+.tab.t-pl.active{color:var(--accent);border-bottom-color:var(--accent)}
+
+/* ---------- Workspace ---------- */
+.workspace{flex:1;overflow:auto;padding:24px;position:relative}
+.sheet-wrap{max-width:100%;animation:fade .25s ease}
+@keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+.sheet-head{display:flex;align-items:baseline;gap:12px;margin-bottom:14px}
+.sheet-head h2{font-family:'Fraunces',serif;font-weight:600;font-size:22px;letter-spacing:-.3px}
+.sheet-head .en{font-size:12px;color:var(--ink-faint);letter-spacing:.5px}
+.sheet-head .tag{
+  font-size:10px;padding:3px 9px;border-radius:20px;font-weight:600;
+  text-transform:uppercase;letter-spacing:.5px;
+}
+.tag.data{background:#eef3f0;color:var(--accent)}
+.tag.recon{background:#f7efe0;color:var(--gold)}
+.tag.pl{background:#eaf0f5;color:var(--sydney)}
+
+.hint{font-size:11.5px;color:var(--ink-faint);margin-bottom:14px;display:flex;gap:14px;flex-wrap:wrap}
+.hint b{color:var(--ink-soft);font-weight:600}
+.legend{display:inline-flex;align-items:center;gap:5px}
+.legend i{width:11px;height:11px;border-radius:3px;display:inline-block;border:1px solid var(--line)}
+.legend i.input{background:#fff}
+.legend i.formula{background:#f0f4f2}
+.legend i.linked{background:#eef6f1;border-color:#c9e3d5}
+
+/* ---------- Grid ---------- */
+.grid-scroll{
+  background:var(--card);border:1px solid var(--line);border-radius:12px;
+  box-shadow:var(--shadow);overflow:auto;max-height:calc(100vh - 230px);
+}
+table.grid{border-collapse:separate;border-spacing:0;font-size:12.5px;width:100%}
+table.grid th,table.grid td{
+  border-right:1px solid var(--line-soft);border-bottom:1px solid var(--line-soft);
+  padding:0;height:32px;position:relative;
+}
+table.grid thead th{
+  position:sticky;top:0;z-index:5;background:#f0ece2;color:var(--ink-soft);
+  font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.4px;
+  text-align:center;padding:6px 8px;height:auto;
+}
+table.grid thead th.corner{left:0;z-index:6;background:#e9e4d8}
+table.grid .rowhead{
+  position:sticky;left:0;z-index:4;background:#f4f0e7;color:var(--ink-faint);
+  text-align:center;font-family:'IBM Plex Mono',monospace;font-size:10px;
+  font-weight:500;min-width:38px;width:38px;
+}
+table.grid td .cell{
+  width:100%;height:100%;padding:5px 9px;display:flex;align-items:center;
+  min-height:32px;white-space:pre;overflow:hidden;
+}
+table.grid td.label .cell{white-space:normal;line-height:1.35;font-size:12px;color:var(--ink)}
+table.grid td.num .cell{justify-content:flex-end;font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums}
+table.grid td.formula{background:#f7faf8}
+table.grid td.formula .cell{color:var(--ink-soft)}
+table.grid td.linked{background:#f1f8f4}
+table.grid td.linked .cell{color:var(--accent);font-weight:500}
+table.grid td.editable{background:#fff;cursor:text}
+table.grid td.editable:hover{background:#fffdf4;box-shadow:inset 0 0 0 1.5px var(--accent-soft)}
+table.grid td.editing{box-shadow:inset 0 0 0 2px var(--accent);background:#fff}
+table.grid td input.editor{
+  width:100%;height:100%;border:none;outline:none;background:transparent;
+  font-family:'IBM Plex Mono',monospace;font-size:12.5px;padding:5px 9px;
+  text-align:right;color:var(--ink);
+}
+table.grid td.text input.editor{text-align:left;font-family:inherit}
+.neg{color:var(--neg)}
+.pos{color:var(--pos)}
+td.pct .cell{color:var(--ink-soft)}
+tr.section td{background:#f0ece2;font-weight:700}
+tr.section td .cell{color:var(--accent);font-size:12px}
+tr.total td{border-top:2px solid var(--line);font-weight:700}
+tr.total td .cell{font-weight:700}
+.formula-bar{
+  display:flex;align-items:center;gap:10px;padding:7px 14px;
+  background:#fbf9f4;border:1px solid var(--line);border-radius:8px;
+  margin-bottom:12px;font-family:'IBM Plex Mono',monospace;font-size:12px;
+  color:var(--ink-soft);min-height:34px;
+}
+.formula-bar .addr{color:var(--gold);font-weight:600;min-width:54px}
+.formula-bar .fx{color:var(--ink-faint)}
+
+/* ---------- Modal ---------- */
+.overlay{
+  position:fixed;inset:0;background:rgba(26,29,41,.4);backdrop-filter:blur(3px);
+  display:none;align-items:center;justify-content:center;z-index:100;
+}
+.overlay.show{display:flex}
+.modal{
+  background:var(--card);border-radius:16px;padding:26px;max-width:480px;width:92%;
+  box-shadow:0 20px 60px rgba(0,0,0,.25);animation:pop .2s ease;
+}
+@keyframes pop{from{transform:scale(.96);opacity:0}to{transform:none;opacity:1}}
+.modal h3{font-family:'Fraunces',serif;font-size:19px;margin-bottom:6px}
+.modal p{color:var(--ink-soft);font-size:13px;margin-bottom:16px}
+.modal label{display:block;font-size:11px;color:var(--ink-faint);text-transform:uppercase;letter-spacing:.5px;margin:12px 0 5px}
+.modal input{width:100%;text-align:left;cursor:text}
+.modal .row{display:flex;gap:10px;margin-top:20px;justify-content:flex-end}
+.modal .field-note{font-size:11px;color:var(--ink-faint);margin-top:4px}
+.banner{
+  padding:10px 14px;border-radius:8px;font-size:12px;margin-bottom:14px;
+  display:flex;gap:8px;align-items:center;
+}
+.banner.warn{background:#fdf3e3;color:#8a5a1a;border:1px solid #f0d9b0}
+.banner.info{background:var(--accent-soft);color:var(--accent);border:1px solid #c9e3d5}
+
+.loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:var(--paper);z-index:200;flex-direction:column;gap:14px}
+.loading .spin{width:34px;height:34px;border:3px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.loading p{color:var(--ink-faint);font-size:13px}
+
+.toast{
+  position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(20px);
+  background:var(--ink);color:#fff;padding:11px 20px;border-radius:10px;font-size:13px;
+  opacity:0;transition:.25s;z-index:150;box-shadow:0 8px 24px rgba(0,0,0,.2);pointer-events:none;
+}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.toast.err{background:var(--neg)}
+
+::-webkit-scrollbar{width:11px;height:11px}
+::-webkit-scrollbar-thumb{background:#d4cdbe;border-radius:6px;border:3px solid var(--card)}
+::-webkit-scrollbar-thumb:hover{background:#c0b8a6}
+</style>
+</head>
+<body>
+<div class="loading" id="loading"><div class="spin"></div><p>正在加载财务模型…</p></div>
+
+<div class="app" id="app" style="display:none">
+  <!-- Top bar -->
+  <div class="topbar">
+    <div class="brand">
+      <span class="logo">DJJ</span>
+      <span class="sub">Financial Reports · 财务报表</span>
+    </div>
+    <div class="spacer"></div>
+    <div class="month-picker">
+      <label>当前月份</label>
+      <select id="monthSelect"></select>
+      <button class="btn ghost" id="newMonthBtn" title="基于上月创建新月份">＋ 新月份</button>
+    </div>
+    <div class="sync-dot local" id="syncStatus"><span class="dot"></span><span class="txt">本地模式</span></div>
+    <button class="btn ghost" id="cloudBtn" title="连接 Supabase 云端">☁ 云端</button>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs" id="tabs"></div>
+
+  <!-- Workspace -->
+  <div class="workspace">
+    <div class="sheet-wrap" id="sheetWrap"></div>
+  </div>
+</div>
+
+<!-- New month modal -->
+<div class="overlay" id="newMonthModal">
+  <div class="modal">
+    <h3>创建新月份</h3>
+    <p>新月份将<b>保留全部格式与公式</b>，清空填写数据；损益表"上月"列会自动带入所选基准月的"本月"数字。</p>
+    <label>新月份</label>
+    <input type="month" id="newMonthInput" />
+    <label>以哪个月为基准（带入上月对比 & 复制公式结构）</label>
+    <select id="baseMonthSelect"></select>
+    <div class="row">
+      <button class="btn ghost" id="newMonthCancel">取消</button>
+      <button class="btn primary" id="newMonthConfirm">创建</button>
+    </div>
+  </div>
+</div>
+
+<!-- Cloud config modal -->
+<div class="overlay" id="cloudModal">
+  <div class="modal">
+    <h3>连接 Supabase 云端</h3>
+    <p>填入你的 Supabase 项目地址与 anon key，即可跨设备同步、多人共享。留空则只用本机存储。</p>
+    <div class="banner info">配置只存在本机浏览器，不会上传到代码仓库。</div>
+    <label>Supabase URL</label>
+    <input type="text" id="supaUrl" placeholder="https://xxxx.supabase.co" />
+    <label>Anon Key</label>
+    <input type="text" id="supaKey" placeholder="eyJhbGci..." />
+    <div class="field-note">建表 SQL 见随附的 <b>supabase_schema.sql</b>。</div>
+    <div class="row">
+      <button class="btn ghost" id="cloudDisconnect">断开</button>
+      <button class="btn ghost" id="cloudCancel">取消</button>
+      <button class="btn primary" id="cloudConnect">连接并同步</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="seed-data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
