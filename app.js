@@ -53,8 +53,12 @@ function seedToBook(){
   const sheets={};
   for(const name of SHEET_ORDER){
     const src=SEED.sheets[name];
+    const layout = LAYOUTS[name];
+    const clearSeed = layout && layout.clearSeedData;
     const rows={};
     for(const row of src.rows){
+      // For sheets marked clearSeedData, drop data rows; keep only header (row 1)
+      if(clearSeed && row.r >= 2) continue;
       rows[row.r]={};
       for(const [coord,cell] of Object.entries(row.cells)){
         const m=coord.match(/^([A-Z]+)(\d+)$/);
@@ -62,7 +66,9 @@ function seedToBook(){
         rows[row.r][col]= cell.f ? {f:normalizeFormula(cell.f)} : {v:cell.v};
       }
     }
-    sheets[name]={rows,lastRow:src.lastRow,lastCol:src.lastCol};
+    // For cleared sheets, reset lastRow to header + a small buffer
+    const lastRow = clearSeed ? 1 : src.lastRow;
+    sheets[name]={rows,lastRow,lastCol:src.lastCol};
   }
   return {sheets};
 }
@@ -177,9 +183,16 @@ function createNewMonth(newMonth, baseMonth){
    ============================================================ */
 let STATE={ month:null, sheet:null, book:null, sel:null, storeFilter:'全部' };
 
+const SEED_VERSION = '2026-04-cleanup-v1';   // bump to re-apply clearSeedData cleanups
+
 function init(){
   if(!localStorage.getItem(LS_BOOK(SEED.month))){
     saveBookLocal(SEED.month, seedToBook());
+  }
+  // One-time cleanup: if the seed version stored differs, re-apply layout's clearSeedData
+  if(localStorage.getItem('djj_seed_version') !== SEED_VERSION){
+    applySeedCleanups();
+    localStorage.setItem('djj_seed_version', SEED_VERSION);
   }
   loadCloudCfg();
   STATE.month=listMonths()[0];
@@ -189,6 +202,32 @@ function init(){
   wireUI();
   $('#loading').style.display='none';
   $('#app').style.display='flex';
+}
+
+function applySeedCleanups(){
+  // For each month book in localStorage, drop data rows in sheets marked clearSeedData
+  const months = listMonths();
+  for(const m of months){
+    const saved = localStorage.getItem(LS_BOOK(m));
+    if(!saved) continue;
+    let book;
+    try{ book = {sheets: JSON.parse(saved)}; } catch(e){ continue; }
+    let changed = false;
+    for(const name of SHEET_ORDER){
+      const layout = LAYOUTS[name];
+      if(!layout || !layout.clearSeedData) continue;
+      const sh = book.sheets[name];
+      if(!sh) continue;
+      // wipe row 2+ (keep header row 1)
+      const newRows = {};
+      if(sh.rows['1']) newRows['1'] = sh.rows['1'];
+      else if(sh.rows[1]) newRows[1] = sh.rows[1];
+      sh.rows = newRows;
+      sh.lastRow = 1;
+      changed = true;
+    }
+    if(changed) localStorage.setItem(LS_BOOK(m), JSON.stringify(book.sheets));
+  }
 }
 
 function openMonth(month){
@@ -279,6 +318,7 @@ function collectStores(sh,col){
 
 /* ---------------- header rendering ---------------- */
 function renderHeader(name,layout){
+  const isManagedList = !!layout.addRowButton;
   let html='<thead>';
   if(layout.useRow1AsHeader){
     const sh=STATE.book.sheets[name];
@@ -289,6 +329,7 @@ function renderHeader(name,layout){
       visibleCols.push(c);
     }
     html+='<tr>';
+    if(isManagedList) html+=`<th class="rowctrl"></th>`;
     for(const c of visibleCols){
       const lbl = (layout.columnNames && layout.columnNames[c])
         || (row1[c] && row1[c].v) || '';
@@ -350,9 +391,33 @@ function renderBody(name,sh,layout){
   const filtering = filterCol && STATE.storeFilter && STATE.storeFilter!=='全部';
   const hideEmptyRows = META[name].type==='pl' || META[name].type==='recon';
 
+  // For user-managed list sheets (addRowButton:true), only show rows with data
+  // + DEFAULT_EMPTY_ROWS extra blank rows. The ➕ button adds more.
+  const DEFAULT_EMPTY_ROWS = 5;
+  const isManagedList = !!layout.addRowButton;
+
+  // First pass: determine which rows have data (so we know how many empties to append)
+  let lastDataRow = start - 1;
+  if(isManagedList){
+    for(let r=start;r<=sh.lastRow;r++){
+      const rc=sh.rows[r]||{};
+      const has = allCols.some(c=>{
+        if(c===layout.autoSerialCol||c===layout.autoMonthCol) return false;
+        return rc[c]!=null;
+      });
+      if(has) lastDataRow = r;
+    }
+  }
+  // Show: data rows + DEFAULT_EMPTY_ROWS extra empty rows.
+  // We may render beyond sh.lastRow (virtually) — those rows just have no rc data,
+  // they're still editable. The ➕ button physically expands sh.lastRow when clicked.
+  const renderUntil = isManagedList
+    ? Math.max(lastDataRow, start-1) + DEFAULT_EMPTY_ROWS
+    : sh.lastRow;
+
   // Count actual data rows for auto-serial
   let serialCounter = 0;
-  for(let r=start;r<=sh.lastRow;r++){
+  for(let r=start;r<=renderUntil;r++){
     const rc=sh.rows[r]||{};
     if(filtering){
       const cell=rc[filterCol];
@@ -360,7 +425,7 @@ function renderBody(name,sh,layout){
     }
     if(hideEmptyRows){
       const has = allCols.some(c => rc[c] || isMeaningful(name,r,c));
-      if(!has){ html+=`<tr class="empty"><td colspan="${allCols.length}">&nbsp;</td></tr>`; continue; }
+      if(!has){ const span=allCols.length+(isManagedList?1:0); html+=`<tr class="empty"><td colspan="${span}">&nbsp;</td></tr>`; continue; }
     }
     // Determine whether to show a serial for this row: only if any non-auto cell has data
     const nonAutoHasData = allCols.some(c=>{
@@ -377,7 +442,16 @@ function renderBody(name,sh,layout){
     if(typeof labelVal==='string'){
       if(/^(Total|总|合计|净利润|毛利合计|利润|gross profit|净利)/i.test(labelVal.trim())) rowCls=' total';
     }
-    html+=`<tr class="${rowCls}">`;
+    // For managed list sheets: row is "empty" (deletable) if no non-auto cell has data
+    const isRowEmpty = isManagedList && !nonAutoHasData;
+    if(isManagedList) rowCls += ' mgrow';
+    if(isRowEmpty) rowCls += ' rowempty';
+
+    html+=`<tr class="${rowCls}" data-r="${r}">`;
+    // Delete-row affordance (shows on hover, only for empty rows in managed lists)
+    if(isManagedList){
+      html+=`<td class="rowctrl"><button class="btn-delrow" data-r="${r}" title="删除此空行">−</button></td>`;
+    }
     for(const c of allCols){
       html+=renderCell(name,r,c,rc[c],layout,{rowSerial});
     }
@@ -386,14 +460,16 @@ function renderBody(name,sh,layout){
 
   // ➕ Add row button (just before footer)
   if(layout.addRowButton){
-    html+=`<tr class="addrow"><td colspan="${allCols.length}">
+    const span = allCols.length + 1; // +1 for rowctrl col
+    html+=`<tr class="addrow"><td colspan="${span}">
       <button class="btn-addrow" id="btnAddRow">＋ 插入一行</button>
     </td></tr>`;
   }
 
-  // Footer row (statistics / user inputs)
+  // Footer row
   if(layout.footer){
     html+=`<tr class="footer-row">`;
+    if(isManagedList) html+=`<td class="rowctrl"></td>`;
     for(const c of allCols){
       const f = layout.footer.cells[c];
       if(!f){ html+=`<td></td>`; continue; }
@@ -496,23 +572,29 @@ function attachGridHandlers(){
       insertRowAtEnd();
       return;
     }
+    // − delete row button
+    const delBtn = e.target.closest('.btn-delrow');
+    if(delBtn){
+      const r = +delBtn.dataset.r;
+      deleteRow(r);
+      return;
+    }
     const td=e.target.closest('td'); if(!td)return;
-    // ignore clicks on footer / addrow rows for cell selection
     if(td.closest('tr.addrow') || td.closest('tr.footer-row')) return;
+    if(td.classList.contains('rowctrl')) return;
     selectCell(td);
   });
   tbody.addEventListener('dblclick',e=>{
     const td=e.target.closest('td'); if(!td)return;
     if(td.closest('tr.addrow') || td.closest('tr.footer-row')) return;
+    if(td.classList.contains('rowctrl')) return;
     if(!td.classList.contains('editable'))return;
     beginEdit(td);
   });
-  // single-click on dropdown opens it immediately
   tbody.addEventListener('click',e=>{
     const td=e.target.closest('td');
     if(td && td.classList.contains('dropdown') && td.classList.contains('editable')) beginEdit(td);
   });
-  // footer input handlers
   tbody.querySelectorAll('input.finput').forEach(inp=>{
     inp.addEventListener('input',e=>{
       const k=e.target.dataset.key, v=e.target.value;
@@ -524,12 +606,38 @@ function attachGridHandlers(){
   if(sf){ sf.onchange=e=>{ STATE.storeFilter=e.target.value; renderSheet(); }; }
 }
 
+function deleteRow(r){
+  const sh=STATE.book.sheets[STATE.sheet];
+  // Safety: only delete empty rows
+  const rc = sh.rows[r];
+  const layout = LAYOUTS[STATE.sheet];
+  if(rc){
+    const hasUserData = Object.entries(rc).some(([col, cell])=>{
+      const c = +col;
+      if(c===layout.autoSerialCol || c===layout.autoMonthCol) return false;
+      if(cell.f !== undefined) return true;
+      return cell.v !== null && cell.v !== undefined && String(cell.v).trim() !== '';
+    });
+    if(hasUserData){ toast('该行有内容，不能直接删除', true); return; }
+    delete sh.rows[r];
+  }
+  // Shift all rows after r up by 1 (only if we're not at the tail)
+  for(let i=r+1; i<=sh.lastRow; i++){
+    if(sh.rows[i]){
+      sh.rows[i-1] = sh.rows[i];
+      delete sh.rows[i];
+    }
+  }
+  sh.lastRow = Math.max(1, sh.lastRow - 1);
+  persist();
+  renderSheet();
+}
+
 function insertRowAtEnd(){
   const sh=STATE.book.sheets[STATE.sheet];
   sh.lastRow = sh.lastRow + 1;
   persist();
   renderSheet();
-  // focus first editable cell in the new row
   setTimeout(()=>{
     const td=document.querySelector(`tr:not(.addrow):not(.footer-row) td.editable[data-r="${sh.lastRow}"]`);
     if(td){ selectCell(td); beginEdit(td); }
