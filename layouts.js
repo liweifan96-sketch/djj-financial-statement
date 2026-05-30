@@ -174,6 +174,7 @@ window.DJJ_LAYOUTS = {
   '门店租赁单据统计': {
     headerRows: 1, dataStartRow: 2,
     useRow1AsHeader: true,
+    clearSeedData: true,                    // 清空 4 月种子数据,只保留表头
     columnNames: {
       1:'序号', 2:'月份', 3:'门店', 4:'对应报价单', 5:'机器型号', 6:'VIN',
       7:'销售', 8:'租期', 9:'租赁起始时间', 10:'最新进销存发票', 11:'状态',
