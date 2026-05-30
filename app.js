@@ -350,6 +350,8 @@ function renderBody(name,sh,layout){
   const filtering = filterCol && STATE.storeFilter && STATE.storeFilter!=='全部';
   const hideEmptyRows = META[name].type==='pl' || META[name].type==='recon';
 
+  // Count actual data rows for auto-serial
+  let serialCounter = 0;
   for(let r=start;r<=sh.lastRow;r++){
     const rc=sh.rows[r]||{};
     if(filtering){
@@ -360,6 +362,14 @@ function renderBody(name,sh,layout){
       const has = allCols.some(c => rc[c] || isMeaningful(name,r,c));
       if(!has){ html+=`<tr class="empty"><td colspan="${allCols.length}">&nbsp;</td></tr>`; continue; }
     }
+    // Determine whether to show a serial for this row: only if any non-auto cell has data
+    const nonAutoHasData = allCols.some(c=>{
+      if(c===layout.autoSerialCol||c===layout.autoMonthCol) return false;
+      return rc[c]!=null;
+    });
+    let rowSerial = null;
+    if(layout.autoSerialCol && nonAutoHasData){ serialCounter++; rowSerial = serialCounter; }
+
     let rowCls='';
     const firstLabelCol = (layout.labelCols && layout.labelCols[0]) || 1;
     const labelCell = rc[firstLabelCol];
@@ -369,10 +379,51 @@ function renderBody(name,sh,layout){
     }
     html+=`<tr class="${rowCls}">`;
     for(const c of allCols){
-      html+=renderCell(name,r,c,rc[c],layout);
+      html+=renderCell(name,r,c,rc[c],layout,{rowSerial});
     }
     html+=`</tr>`;
   }
+
+  // ➕ Add row button (just before footer)
+  if(layout.addRowButton){
+    html+=`<tr class="addrow"><td colspan="${allCols.length}">
+      <button class="btn-addrow" id="btnAddRow">＋ 插入一行</button>
+    </td></tr>`;
+  }
+
+  // Footer row (statistics / user inputs)
+  if(layout.footer){
+    html+=`<tr class="footer-row">`;
+    for(const c of allCols){
+      const f = layout.footer.cells[c];
+      if(!f){ html+=`<td></td>`; continue; }
+      if(f.kind==='label'){
+        html+=`<td class="footer-label"><div class="cell">${escapeHtml(f.label)}</div></td>`;
+      } else if(f.kind==='auto'){
+        // count non-empty cells in source column
+        let count=0;
+        for(let r=start;r<=sh.lastRow;r++){
+          const rc=sh.rows[r]||{};
+          if(filtering){
+            const cell=rc[filterCol];
+            if(!cell || (cell.v||'').toString().trim()!==STATE.storeFilter) continue;
+          }
+          const sc = rc[f.sourceCol];
+          if(sc && sc.v!=null && String(sc.v).trim()!=='') count++;
+        }
+        html+=`<td class="footer-auto"><div class="cell"><b>${escapeHtml(f.label)}：</b>${count}</div></td>`;
+      } else if(f.kind==='input'){
+        // value comes from a special footer-input store keyed by sheet+month+col
+        const key = `${name}__${STATE.month}__footer_${c}`;
+        const stored = localStorage.getItem('djj_finput_'+key) || '';
+        html+=`<td class="footer-input"><div class="cell"><b>${escapeHtml(f.label)}：</b>
+          <input class="finput" data-key="${escapeHtml(key)}" value="${escapeHtml(stored)}" placeholder="${escapeHtml(f.placeholder||'')}" />
+        </div></td>`;
+      }
+    }
+    html+=`</tr>`;
+  }
+
   html+='</tbody>';
   return html;
 }
@@ -383,7 +434,8 @@ function isMeaningful(name,r,c){
   return true;
 }
 
-function renderCell(name,r,c,cell,layout){
+function renderCell(name,r,c,cell,layout,opts){
+  opts = opts || {};
   const val=cellValue(name,r,c);
   const isErr=val&&typeof val==='object'&&val.__err;
   const hasF=cell&&cell.f!==undefined;
@@ -394,17 +446,30 @@ function renderCell(name,r,c,cell,layout){
   const isPctCol = (layout.pctCols||[]).includes(c);
   const isDateCol = (layout.dateCols||[]).includes(c);
 
-  const editable = !hasF;
-  const isText = isLabelCol || isDateCol || (typeof val==='string');
+  // Auto-filled columns: serial number, current month
+  const isAutoSerial = layout.autoSerialCol===c;
+  const isAutoMonth = layout.autoMonthCol===c;
+  const isDropdown = layout.dropdowns && layout.dropdowns[c];
+
+  // Auto cols are not editable; the value is computed at render time
+  let autoVal = null;
+  if(isAutoSerial && opts.rowSerial!=null) autoVal = opts.rowSerial;
+  if(isAutoMonth) autoVal = monthLabel(STATE.month);
+
+  const editable = !hasF && !isAutoSerial && !isAutoMonth;
+  const isText = isLabelCol || isDateCol || isAutoMonth || isDropdown || (typeof val==='string');
 
   let cls='';
   if(isText) cls+=' label text';
   else cls+=' num';
   if(hasF) cls+= isLinked?' linked':' formula';
-  if(editable && !hasF) cls+=' editable';
+  if(isAutoSerial || isAutoMonth) cls+=' auto';
+  if(isDropdown) cls+=' dropdown';
+  if(editable) cls+=' editable';
 
   let display='';
-  if(isErr){ display='—'; }
+  if(autoVal!=null){ display=String(autoVal); }
+  else if(isErr){ display='—'; }
   else if(val===null||val===undefined||val===''){ display=''; }
   else if(isText){ display=String(val); }
   else if(isPctCol){ display=fmtPct(val); }
@@ -426,15 +491,49 @@ function attachGridHandlers(){
   const tbody=$('#sheetWrap tbody');
   if(!tbody) return;
   tbody.addEventListener('click',e=>{
+    // ➕ add row button
+    if(e.target.id==='btnAddRow' || e.target.closest('#btnAddRow')){
+      insertRowAtEnd();
+      return;
+    }
     const td=e.target.closest('td'); if(!td)return;
+    // ignore clicks on footer / addrow rows for cell selection
+    if(td.closest('tr.addrow') || td.closest('tr.footer-row')) return;
     selectCell(td);
   });
   tbody.addEventListener('dblclick',e=>{
-    const td=e.target.closest('td'); if(!td||!td.classList.contains('editable'))return;
+    const td=e.target.closest('td'); if(!td)return;
+    if(td.closest('tr.addrow') || td.closest('tr.footer-row')) return;
+    if(!td.classList.contains('editable'))return;
     beginEdit(td);
+  });
+  // single-click on dropdown opens it immediately
+  tbody.addEventListener('click',e=>{
+    const td=e.target.closest('td');
+    if(td && td.classList.contains('dropdown') && td.classList.contains('editable')) beginEdit(td);
+  });
+  // footer input handlers
+  tbody.querySelectorAll('input.finput').forEach(inp=>{
+    inp.addEventListener('input',e=>{
+      const k=e.target.dataset.key, v=e.target.value;
+      if(v.trim()==='') localStorage.removeItem('djj_finput_'+k);
+      else localStorage.setItem('djj_finput_'+k, v);
+    });
   });
   const sf=$('#storeFilter');
   if(sf){ sf.onchange=e=>{ STATE.storeFilter=e.target.value; renderSheet(); }; }
+}
+
+function insertRowAtEnd(){
+  const sh=STATE.book.sheets[STATE.sheet];
+  sh.lastRow = sh.lastRow + 1;
+  persist();
+  renderSheet();
+  // focus first editable cell in the new row
+  setTimeout(()=>{
+    const td=document.querySelector(`tr:not(.addrow):not(.footer-row) td.editable[data-r="${sh.lastRow}"]`);
+    if(td){ selectCell(td); beginEdit(td); }
+  },50);
 }
 function selectCell(td){
   document.querySelectorAll('td.sel').forEach(x=>x.classList.remove('sel'));
@@ -468,7 +567,27 @@ function beginEdit(td){
   const r=+td.dataset.r,c=+td.dataset.c;
   const cell=(STATE.book.sheets[STATE.sheet].rows[r]||{})[c];
   const cur=cell? (cell.f!==undefined?cell.f:cell.v) : '';
+  const layout=LAYOUTS[STATE.sheet];
+  const dropdownOpts = layout && layout.dropdowns && layout.dropdowns[c];
+
   td.classList.add('editing');
+  if(dropdownOpts){
+    const opts = ['',...dropdownOpts].map(o=>`<option value="${escapeHtml(o)}"${o===cur?' selected':''}>${escapeHtml(o||'— 选择 —')}</option>`).join('');
+    td.innerHTML=`<select class="editor dropdown-editor">${opts}</select>`;
+    const sel=td.querySelector('select'); sel.focus();
+    let committed=false;
+    const commit=save=>{
+      if(committed) return; committed=true;
+      td.classList.remove('editing');
+      if(save) applyEdit(r,c,sel.value);
+      else renderSheet();
+    };
+    sel.addEventListener('change',()=>commit(true));
+    sel.addEventListener('blur',()=>commit(true));
+    sel.addEventListener('keydown',ev=>{ if(ev.key==='Escape') commit(false); });
+    return;
+  }
+
   td.innerHTML=`<input class="editor" value="${escapeHtml(cur===null?'':cur)}" />`;
   const inp=td.querySelector('input'); inp.focus(); inp.select();
   let committed=false;
