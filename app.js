@@ -1,14 +1,18 @@
 /* ============================================================
-   DJJ Finance — front-end app
+   DJJ Finance — v2 front-end
+   - Layout-aware grid (real column names, no A/B/C/1/2/3)
+   - Two-level grouped headers (store grouping)
+   - Currency formatting with $ + thousands separators
+   - Store filter dropdown for vertical sheets
+   - Dynamic month headers in P&L (上月/本月 -> real YYYY.MM)
    - HyperFormula engine drives all cross-sheet formulas
-   - Months stored locally (and optionally Supabase)
-   - New month: clears inputs, keeps format+formulas, carries last month
+   - Local + optional Supabase persistence
    ============================================================ */
 
 const SEED = window.DJJ_SEED;
+const LAYOUTS = window.DJJ_LAYOUTS;
 const SHEET_ORDER = SEED.sheetOrder;
 const META = SEED.meta;
-const COLLATOR = new Intl.Collator();
 
 /* ---------------- helpers ---------------- */
 const $ = s => document.querySelector(s);
@@ -16,21 +20,35 @@ const colToLetter = n => { let s=''; while(n>0){ const m=(n-1)%26; s=String.from
 const letterToCol = s => { let n=0; for(const ch of s) n=n*26+(ch.charCodeAt(0)-64); return n; };
 function toast(msg, err=false){ const t=$('#toast'); t.textContent=msg; t.className='toast show'+(err?' err':''); setTimeout(()=>t.className='toast',2200); }
 function isNum(v){ return v!==''&&v!==null&&v!==undefined&&!isNaN(v); }
-function fmtNum(v){
-  if(v===null||v===undefined||v==='') return '';
-  if(typeof v==='string') return v;
-  if(typeof v==='number'){
-    if(Number.isInteger(v)) return v.toLocaleString('en-US');
-    return v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
-  }
-  return String(v);
-}
+function escapeHtml(s){ return String(s).replace(/[&<>]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch])); }
 
-/* ---------------- workbook model ----------------
-   A "book" = one month. Structure:
-   book.sheets[name] = { rows: { rowIndex: { col: {f?, v} } }, lastRow, lastCol }
-   We keep formulas (f) as source of truth; values (v) recomputed by engine.
--------------------------------------------------- */
+function fmtMoney(v){
+  if(v===null||v===undefined||v==='') return '';
+  if(typeof v!=='number') return String(v);
+  const neg = v<0;
+  const abs = Math.abs(v);
+  const s = abs.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  return (neg?'-':'') + '$' + s;
+}
+function fmtNumPlain(v){
+  if(v===null||v===undefined||v==='') return '';
+  if(typeof v!=='number') return String(v);
+  if(Number.isInteger(v)) return v.toLocaleString('en-US');
+  return v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+function fmtPct(v){
+  if(v===null||v===undefined||v==='') return '';
+  if(typeof v!=='number') return String(v);
+  return (v*100).toLocaleString('en-US',{maximumFractionDigits:1})+'%';
+}
+function shiftMonth(ym,delta){
+  const [y,m]=ym.split('-').map(Number);
+  const d=new Date(y,m-1+delta,1);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+}
+function monthLabel(ym){ const [y,m]=ym.split('-'); return `${y}.${m}`; }
+
+/* ---------------- workbook model ---------------- */
 function seedToBook(){
   const sheets={};
   for(const name of SHEET_ORDER){
@@ -48,15 +66,11 @@ function seedToBook(){
   }
   return {sheets};
 }
-function normalizeFormula(f){
-  // HyperFormula doesn't have ARRAYFORMULA; unwrap it
-  f=f.replace(/=ARRAYFORMULA\((.*)\)\s*$/i,'=$1');
-  return f;
-}
+function normalizeFormula(f){ return f.replace(/=ARRAYFORMULA\((.*)\)\s*$/i,'=$1'); }
 
 /* ---------------- HyperFormula engine ---------------- */
 let HF=null;
-let HF_SHEETID={};   // sheetName -> hf sheet id
+let HF_SHEETID={};
 function buildEngine(book){
   if(HF){ HF.destroy(); HF=null; }
   const sheetsData={};
@@ -82,7 +96,7 @@ function buildEngine(book){
 function cellValue(name,row,col){
   const id=HF_SHEETID[name];
   const v=HF.getCellValue({sheet:id,row:row-1,col:col-1});
-  if(v&&typeof v==='object'&&v.type) return {__err:v.type}; // surface error type
+  if(v&&typeof v==='object'&&v.type) return {__err:v.type};
   return v;
 }
 function setCell(name,row,col,raw){
@@ -90,20 +104,15 @@ function setCell(name,row,col,raw){
   HF.setCellContents({sheet:id,row:row-1,col:col-1},raw);
 }
 
-/* ---------------- months store (local) ----------------
-   localStorage key: djj_book_<YYYY-MM> = JSON of book.sheets (only {f}/{v} overrides + meta)
-   We persist the *entire* sheets structure per month for fidelity.
--------------------------------------------------- */
+/* ---------------- months store ---------------- */
 const LS_MONTHS='djj_months';
 const LS_BOOK=m=>'djj_book_'+m;
 const LS_CLOUD='djj_cloud_cfg';
-
 function listMonths(){
   const raw=localStorage.getItem(LS_MONTHS);
   let arr=raw?JSON.parse(raw):[];
   if(!arr.includes(SEED.month)) arr.push(SEED.month);
-  arr=[...new Set(arr)].sort().reverse();
-  return arr;
+  return [...new Set(arr)].sort().reverse();
 }
 function saveMonthsList(arr){ localStorage.setItem(LS_MONTHS,JSON.stringify([...new Set(arr)].sort())); }
 function loadBook(month){
@@ -122,54 +131,37 @@ function saveBookLocal(month,book){
   saveMonthsList(months);
 }
 
-/* ---------------- new month creation ----------------
-   Strategy:
-   - Clone base month's sheet structure (keeps ALL formulas + format/labels).
-   - For DATA sheets: clear the transaction value rows (keep header row 1),
-     leaving formulas intact. (Inputs blanked, formulas stay.)
-   - For P&L sheets: shift "this month (C)" computed values into "last month (B)"
-     as plain numbers (carry-forward), clear the hardcoded C inputs but keep C formulas.
-   - For recon sheet: keep formulas, clear hardcoded inputs.
--------------------------------------------------- */
-const PL_SHEETS=SHEET_ORDER.filter(n=>META[n].type==='pl');
+/* ---------------- new month creation ---------------- */
 function createNewMonth(newMonth, baseMonth){
   const base=loadBook(baseMonth);
-  // need base computed values for carry-forward
   buildEngine(base);
   const fresh=JSON.parse(JSON.stringify(base.sheets));
-
   for(const name of SHEET_ORDER){
     const t=META[name].type;
     const sh=fresh[name];
     if(t==='data'){
-      // keep row 1 (header) + any rows that are entirely formula (totals). Clear input values in rows>=2.
       for(let r=2;r<=sh.lastRow;r++){
         const rc=sh.rows[r]; if(!rc) continue;
         for(const c of Object.keys(rc)){
-          if(rc[c].f===undefined){ delete rc[c]; } // blank inputs, keep formulas
+          if(rc[c].f===undefined){ delete rc[c]; }
         }
         if(Object.keys(rc).length===0) delete sh.rows[r];
       }
     } else if(t==='pl'){
-      // Column B = last month, C = this month
       for(let r=1;r<=sh.lastRow;r++){
         const rc=sh.rows[r]; if(!rc) continue;
-        const Bc=letterToCol('B'), Cc=letterToCol('C');
-        // carry: new B = base computed C
+        const Bc=2, Cc=3;
         const baseC=cellValue(name,r,Cc);
         if(rc[Cc]!==undefined){
           if(typeof baseC==='number') rc[Bc]={v:baseC};
-          // clear C inputs (hardcoded), keep C formulas
           if(rc[Cc].f===undefined) delete rc[Cc];
         }
       }
     } else if(t==='recon'){
-      // keep formulas, clear hardcoded numeric inputs (keep text labels in col A,C,E,G...)
       for(let r=2;r<=sh.lastRow;r++){
         const rc=sh.rows[r]; if(!rc) continue;
         for(const c of Object.keys(rc)){
-          const cell=rc[c];
-          if(cell.f===undefined && typeof cell.v==='number'){ delete rc[c]; }
+          if(rc[c].f===undefined && typeof rc[c].v==='number'){ delete rc[c]; }
         }
       }
     }
@@ -183,10 +175,9 @@ function createNewMonth(newMonth, baseMonth){
 /* ============================================================
    APP STATE + RENDER
    ============================================================ */
-let STATE={ month:null, sheet:null, book:null, sel:null };
+let STATE={ month:null, sheet:null, book:null, sel:null, storeFilter:'全部' };
 
 function init(){
-  // ensure seed month persisted
   if(!localStorage.getItem(LS_BOOK(SEED.month))){
     saveBookLocal(SEED.month, seedToBook());
   }
@@ -203,7 +194,7 @@ function init(){
 function openMonth(month){
   STATE.month=month;
   STATE.book=loadBook(month);
-  if(!STATE.book){ STATE.book=seedToBook(); }
+  if(!STATE.book) STATE.book=seedToBook();
   buildEngine(STATE.book);
   renderMonthSelect();
 }
@@ -211,7 +202,7 @@ function openMonth(month){
 function renderMonthSelect(){
   const sel=$('#monthSelect'); sel.innerHTML='';
   for(const m of listMonths()){
-    const o=document.createElement('option'); o.value=m; o.textContent=m.replace('-','年')+'月';
+    const o=document.createElement('option'); o.value=m; o.textContent=monthLabel(m);
     if(m===STATE.month) o.selected=true; sel.appendChild(o);
   }
 }
@@ -223,119 +214,266 @@ function renderTabs(){
     const b=document.createElement('button');
     b.className='tab t-'+m.type+(name===STATE.sheet?' active':'');
     b.innerHTML=`${m.label}<span class="badge">${m.en}</span>`;
-    b.onclick=()=>{ STATE.sheet=name; STATE.sel=null; renderTabs(); renderSheet(); };
+    b.onclick=()=>{ STATE.sheet=name; STATE.sel=null; STATE.storeFilter='全部'; renderTabs(); renderSheet(); };
     t.appendChild(b);
   }
 }
 
+/* ---------------- main sheet renderer ---------------- */
 function renderSheet(){
   const name=STATE.sheet, m=META[name], sh=STATE.book.sheets[name];
+  const layout=LAYOUTS[name] || {headerRows:1,dataStartRow:2,useRow1AsHeader:true,columnNames:{},moneyCols:[],labelCols:[]};
   const wrap=$('#sheetWrap');
   const tagClass=m.type==='data'?'data':m.type==='recon'?'recon':'pl';
   const tagTxt=m.type==='data'?'数据填写':m.type==='recon'?'核对·自动':'损益表·自动';
 
+  const sheetTitle = name.replace(/^\d{4}\.\d{2}月/,'');
   let html=`<div class="sheet-head">
-    <h2>${m.label}</h2><span class="en">${m.en}</span>
-    <span class="tag ${tagClass}">${tagTxt}</span></div>`;
+    <h2>${sheetTitle}</h2><span class="en">${m.en}</span>
+    <span class="tag ${tagClass}">${tagTxt}</span>`;
+  if(layout.storeFilterCol){
+    const stores=collectStores(sh,layout.storeFilterCol);
+    html+=`<div class="store-filter">
+      <label>门店筛选</label>
+      <select id="storeFilter">
+        <option value="全部">全部门店</option>
+        ${stores.map(s=>`<option value="${escapeHtml(s)}"${s===STATE.storeFilter?' selected':''}>${escapeHtml(s)}</option>`).join('')}
+      </select>
+    </div>`;
+  }
+  html+=`</div>`;
 
   if(m.type==='data'){
     html+=`<div class="hint">
-      <span><b>蓝色可编辑</b>单元格直接填写交易明细，下方损益表会自动汇总。</span>
+      <span><b>白色单元格可填写</b>，绿色为自动计算。</span>
       <span class="legend"><i class="input"></i>可填写</span>
-      <span class="legend"><i class="formula"></i>公式（自动）</span></div>`;
+      <span class="legend"><i class="formula"></i>公式自动</span></div>`;
   }else if(m.type==='pl'){
+    const lm=monthLabel(shiftMonth(STATE.month,-1)), tm=monthLabel(STATE.month);
     html+=`<div class="hint">
-      <span><b>B列=上月</b>（新建月份时自动带入），<b>C列=本月</b>（蓝色为手填费用，绿色自动来自数据表）。</span>
+      <span><b>${lm}</b> = 上月对比（新建月份自动带入），<b>${tm}</b> = 本月（蓝色手填，绿色自动）</span>
       <span class="legend"><i class="linked"></i>跨表自动</span>
       <span class="legend"><i class="input"></i>手填</span></div>`;
   }else{
-    html+=`<div class="hint"><span>本表为<b>核对中枢</b>：自动从各数据表汇总，再供三张损益表引用。绿色为跨表公式。</span></div>`;
+    html+=`<div class="hint"><span>本表为<b>核对中枢</b>：自动从各数据表汇总，再供三张损益表引用。</span></div>`;
   }
 
   html+=`<div class="formula-bar" id="fbar"><span class="addr">—</span><span class="fx">点击单元格查看公式</span></div>`;
-  html+=`<div class="grid-scroll"><table class="grid"><thead><tr><th class="corner"></th>`;
-  for(let c=1;c<=sh.lastCol;c++) html+=`<th>${colToLetter(c)}</th>`;
-  html+=`</tr></thead><tbody>`;
-
-  for(let r=1;r<=sh.lastRow;r++){
-    const rc=sh.rows[r]||{};
-    html+=`<tr><td class="rowhead">${r}</td>`;
-    for(let c=1;c<=sh.lastCol;c++){
-      html+=renderCell(name,r,c,rc[c]);
-    }
-    html+=`</tr>`;
-  }
-  html+=`</tbody></table></div>`;
+  html+=`<div class="grid-scroll"><table class="grid">`;
+  html+=renderHeader(name,layout);
+  html+=renderBody(name,sh,layout);
+  html+=`</table></div>`;
   wrap.innerHTML=html;
   attachGridHandlers();
 }
 
-function renderCell(name,r,c,cell){
+function collectStores(sh,col){
+  const set=new Set();
+  for(let r=2;r<=sh.lastRow;r++){
+    const rc=sh.rows[r]; if(!rc) continue;
+    const cell=rc[col]; if(!cell) continue;
+    const v=cell.v; if(typeof v==='string' && v.trim()) set.add(v.trim());
+  }
+  return [...set].sort();
+}
+
+/* ---------------- header rendering ---------------- */
+function renderHeader(name,layout){
+  let html='<thead>';
+  if(layout.useRow1AsHeader){
+    const sh=STATE.book.sheets[name];
+    const row1=sh.rows[1]||{};
+    const visibleCols=[];
+    for(let c=1;c<=sh.lastCol;c++){
+      if(layout.hideCols && layout.hideCols.includes(c)) continue;
+      visibleCols.push(c);
+    }
+    html+='<tr>';
+    for(const c of visibleCols){
+      const lbl = (layout.columnNames && layout.columnNames[c])
+        || (row1[c] && row1[c].v) || '';
+      const clean = String(lbl).replace(/\s+/g,' ').trim();
+      html+=`<th data-col="${c}"><div class="hcell">${escapeHtml(clean)}</div></th>`;
+    }
+    html+='</tr></thead>';
+    return html;
+  }
+  const groups = layout.groups || [];
+  html+='<tr class="hgroup">';
+  for(const g of groups){
+    const visCols = g.cols.filter(c=>!(layout.hideCols||[]).includes(c));
+    if(!visCols.length) continue;
+    if(g.flat){
+      html+=`<th class="g-${g.color}" colspan="${visCols.length}" rowspan="2"><div class="hcell">${escapeHtml(g.label)}</div></th>`;
+    } else {
+      html+=`<th class="g-${g.color}" colspan="${visCols.length}"><div class="hcell">${escapeHtml(g.label)}</div></th>`;
+    }
+  }
+  html+='</tr>';
+  html+='<tr class="hsub">';
+  for(const g of groups){
+    if(g.flat) continue;
+    const visCols = g.cols.filter(c=>!(layout.hideCols||[]).includes(c));
+    visCols.forEach((c)=>{
+      let sub = g.subHeaders[g.cols.indexOf(c)] || '';
+      if(layout.dynamicHeaders && layout.dynamicHeaders[c]){
+        const kind=layout.dynamicHeaders[c];
+        if(kind==='lastMonth') sub=monthLabel(shiftMonth(STATE.month,-1));
+        else if(kind==='thisMonth') sub=monthLabel(STATE.month);
+      }
+      html+=`<th class="g-${g.color} sub" data-col="${c}"><div class="hcell">${escapeHtml(sub)}</div></th>`;
+    });
+  }
+  html+='</tr></thead>';
+  return html;
+}
+
+/* ---------------- body rendering ---------------- */
+function renderBody(name,sh,layout){
+  let html='<tbody>';
+  const start = layout.dataStartRow || 2;
+  const allCols=[];
+  if(layout.useRow1AsHeader){
+    for(let c=1;c<=sh.lastCol;c++){
+      if((layout.hideCols||[]).includes(c)) continue;
+      allCols.push(c);
+    }
+  } else {
+    for(const g of layout.groups||[]){
+      for(const c of g.cols){
+        if(!(layout.hideCols||[]).includes(c)) allCols.push(c);
+      }
+    }
+  }
+
+  const filterCol = layout.storeFilterCol;
+  const filtering = filterCol && STATE.storeFilter && STATE.storeFilter!=='全部';
+  const hideEmptyRows = META[name].type==='pl' || META[name].type==='recon';
+
+  for(let r=start;r<=sh.lastRow;r++){
+    const rc=sh.rows[r]||{};
+    if(filtering){
+      const cell=rc[filterCol];
+      if(!cell || (cell.v||'').toString().trim()!==STATE.storeFilter) continue;
+    }
+    if(hideEmptyRows){
+      const has = allCols.some(c => rc[c] || isMeaningful(name,r,c));
+      if(!has){ html+=`<tr class="empty"><td colspan="${allCols.length}">&nbsp;</td></tr>`; continue; }
+    }
+    let rowCls='';
+    const firstLabelCol = (layout.labelCols && layout.labelCols[0]) || 1;
+    const labelCell = rc[firstLabelCol];
+    const labelVal = labelCell ? (labelCell.v||'') : '';
+    if(typeof labelVal==='string'){
+      if(/^(Total|总|合计|净利润|毛利合计|利润|gross profit|净利)/i.test(labelVal.trim())) rowCls=' total';
+    }
+    html+=`<tr class="${rowCls}">`;
+    for(const c of allCols){
+      html+=renderCell(name,r,c,rc[c],layout);
+    }
+    html+=`</tr>`;
+  }
+  html+='</tbody>';
+  return html;
+}
+function isMeaningful(name,r,c){
+  const v=cellValue(name,r,c);
+  if(v===null||v===undefined||v==='') return false;
+  if(v&&v.__err) return false;
+  return true;
+}
+
+function renderCell(name,r,c,cell,layout){
   const val=cellValue(name,r,c);
   const isErr=val&&typeof val==='object'&&val.__err;
   const hasF=cell&&cell.f!==undefined;
   const isLinked=hasF&&/[!]/.test(cell.f);
-  const isText=(typeof val==='string')||(cell&&typeof cell.v==='string'&&!hasF);
-  const editable=cell===undefined? cellEditableEmpty(name,r,c) : (!hasF);
+
+  const isLabelCol = (layout.labelCols||[]).includes(c);
+  const isMoneyCol = (layout.moneyCols||[]).includes(c);
+  const isPctCol = (layout.pctCols||[]).includes(c);
+  const isDateCol = (layout.dateCols||[]).includes(c);
+
+  const editable = !hasF;
+  const isText = isLabelCol || isDateCol || (typeof val==='string');
+
   let cls='';
   if(isText) cls+=' label text';
   else cls+=' num';
   if(hasF) cls+= isLinked?' linked':' formula';
-  if(editable) cls+=' editable';
+  if(editable && !hasF) cls+=' editable';
 
   let display='';
   if(isErr){ display='—'; }
-  else if(isText) display = val!==null&&val!==undefined? String(val): (cell&&cell.v!==undefined?String(cell.v):'');
-  else display = fmtNum(val);
+  else if(val===null||val===undefined||val===''){ display=''; }
+  else if(isText){ display=String(val); }
+  else if(isPctCol){ display=fmtPct(val); }
+  else if(isMoneyCol){ display=fmtMoney(val); }
+  else if(typeof val==='number'){ display=fmtNumPlain(val); }
+  else { display=String(val); }
+
   let extra='';
-  if(!isErr && !isText && typeof val==='number'){
-    if(c===letterToCol('E') && META[name].type==='pl' && r>=3){ display=(val*100).toLocaleString('en-US',{maximumFractionDigits:1})+'%'; extra=val<0?' pct neg':' pct pos'; }
-    else if(val<0){ extra=' neg'; }
-  }
   if(isErr) extra=' pct';
+  else if(typeof val==='number' && val<0) extra=' neg';
+  else if(typeof val==='number' && val>0 && isPctCol) extra=' pos';
+
   const data=`data-r="${r}" data-c="${c}"`;
   return `<td class="${cls}${extra}" ${data}><div class="cell">${escapeHtml(display)}</div></td>`;
 }
-function cellEditableEmpty(name,r,c){
-  // empty cells in data sheets (rows>=2, within input columns) are editable
-  const t=META[name].type;
-  if(t==='data'&&r>=2) return true;
-  if(t==='pl'&&c===letterToCol('C')) return true;
-  return false;
-}
-function escapeHtml(s){ return String(s).replace(/[&<>]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch])); }
 
 /* ---------------- editing ---------------- */
 function attachGridHandlers(){
   const tbody=$('#sheetWrap tbody');
+  if(!tbody) return;
   tbody.addEventListener('click',e=>{
-    const td=e.target.closest('td'); if(!td||td.classList.contains('rowhead'))return;
+    const td=e.target.closest('td'); if(!td)return;
     selectCell(td);
   });
   tbody.addEventListener('dblclick',e=>{
     const td=e.target.closest('td'); if(!td||!td.classList.contains('editable'))return;
     beginEdit(td);
   });
+  const sf=$('#storeFilter');
+  if(sf){ sf.onchange=e=>{ STATE.storeFilter=e.target.value; renderSheet(); }; }
 }
 function selectCell(td){
   document.querySelectorAll('td.sel').forEach(x=>x.classList.remove('sel'));
+  td.classList.add('sel');
   const r=+td.dataset.r,c=+td.dataset.c;
+  if(isNaN(r)||isNaN(c)) return;
   STATE.sel={r,c};
   const cell=(STATE.book.sheets[STATE.sheet].rows[r]||{})[c];
   const fbar=$('#fbar');
-  const addr=colToLetter(c)+r;
-  if(cell&&cell.f!==undefined) fbar.innerHTML=`<span class="addr">${addr}</span><span class="fx">${escapeHtml(cell.f)}</span>`;
-  else { const v=cellValue(STATE.sheet,r,c); const disp=(v&&v.__err)?'（'+v.__err+'）':(v===null||v===undefined?'（空）':String(v)); fbar.innerHTML=`<span class="addr">${addr}</span><span class="fx">${escapeHtml(disp)}</span>`; }
+  const addr=`行${r}·${getColLabel(c)}`;
+  if(cell&&cell.f!==undefined) fbar.innerHTML=`<span class="addr">${escapeHtml(addr)}</span><span class="fx">${escapeHtml(cell.f)}</span>`;
+  else {
+    const v=cellValue(STATE.sheet,r,c);
+    const disp=(v&&v.__err)?'（'+v.__err+'）':(v===null||v===undefined||v===''?'（空）':String(v));
+    fbar.innerHTML=`<span class="addr">${escapeHtml(addr)}</span><span class="fx">${escapeHtml(disp)}</span>`;
+  }
+}
+function getColLabel(c){
+  const layout=LAYOUTS[STATE.sheet];
+  if(!layout) return colToLetter(c);
+  if(layout.columnNames && layout.columnNames[c]) return layout.columnNames[c];
+  if(layout.groups){
+    for(const g of layout.groups){
+      const idx=g.cols.indexOf(c);
+      if(idx>=0) return g.label+'·'+(g.subHeaders[idx]||colToLetter(c));
+    }
+  }
+  return colToLetter(c);
 }
 function beginEdit(td){
   const r=+td.dataset.r,c=+td.dataset.c;
   const cell=(STATE.book.sheets[STATE.sheet].rows[r]||{})[c];
   const cur=cell? (cell.f!==undefined?cell.f:cell.v) : '';
-  const isText=td.classList.contains('text');
   td.classList.add('editing');
   td.innerHTML=`<input class="editor" value="${escapeHtml(cur===null?'':cur)}" />`;
   const inp=td.querySelector('input'); inp.focus(); inp.select();
+  let committed=false;
   const commit=save=>{
+    if(committed) return; committed=true;
     td.classList.remove('editing');
     if(save) applyEdit(r,c,inp.value);
     else renderSheet();
@@ -361,7 +499,6 @@ function applyEdit(r,c,raw){
   else if(raw.startsWith('=')){ sh.rows[r][c]={f:raw}; setCell(STATE.sheet,r,c,raw); }
   else if(isNum(raw)){ const n=Number(raw); sh.rows[r][c]={v:n}; setCell(STATE.sheet,r,c,n); }
   else { sh.rows[r][c]={v:raw}; setCell(STATE.sheet,r,c,raw); }
-  // expand lastRow if needed
   if(r>sh.lastRow) sh.lastRow=r;
   persist();
   renderSheet();
@@ -381,10 +518,7 @@ function persist(){
   },600);
 }
 
-/* ============================================================
-   SUPABASE CLOUD
-   table: djj_books(month text primary key, data jsonb, updated_at timestamptz)
-   ============================================================ */
+/* ---------------- supabase ---------------- */
 const CLOUD={client:null,url:'',key:''};
 function loadCloudCfg(){
   const raw=localStorage.getItem(LS_CLOUD); if(!raw)return;
@@ -406,7 +540,6 @@ async function cloudSaveBook(month,book){
   if(error)throw error;
 }
 async function cloudSyncAll(){
-  // pull all cloud months, merge into local list
   try{
     const {data,error}=await CLOUD.client.from('djj_books').select('month,data');
     if(error)throw error;
@@ -416,7 +549,6 @@ async function cloudSyncAll(){
       if(!months.includes(row.month)) months.push(row.month);
     }
     saveMonthsList(months);
-    // also push any local-only months
     for(const m of months){
       if(!data.find(d=>d.month===m)){ const b=loadBook(m); if(b) await cloudSaveBook(m,b); }
     }
@@ -429,22 +561,16 @@ function setSync(cls,txt){
   el.querySelector('.txt').textContent=txt;
 }
 
-/* ============================================================
-   UI WIRING
-   ============================================================ */
+/* ---------------- UI wiring ---------------- */
 function wireUI(){
   $('#monthSelect').onchange=e=>{ openMonth(e.target.value); renderSheet(); };
-
-  // new month modal
   $('#newMonthBtn').onclick=()=>{
     const months=listMonths();
     const base=months[0];
-    const [y,mo]=base.split('-').map(Number);
-    const nd=new Date(y,mo,1); // next month
-    const nm=`${nd.getFullYear()}-${String(nd.getMonth()+1).padStart(2,'0')}`;
+    const nm=shiftMonth(base,1);
     $('#newMonthInput').value=nm;
     const bs=$('#baseMonthSelect'); bs.innerHTML='';
-    months.forEach(m=>{const o=document.createElement('option');o.value=m;o.textContent=m;bs.appendChild(o);});
+    months.forEach(m=>{const o=document.createElement('option');o.value=m;o.textContent=monthLabel(m);bs.appendChild(o);});
     $('#newMonthModal').classList.add('show');
   };
   $('#newMonthCancel').onclick=()=>$('#newMonthModal').classList.remove('show');
@@ -455,10 +581,8 @@ function wireUI(){
     createNewMonth(nm,base);
     $('#newMonthModal').classList.remove('show');
     openMonth(nm); renderSheet();
-    toast(`已创建 ${nm}，格式与公式已保留，数据已清空`);
+    toast(`已创建 ${monthLabel(nm)}，格式与公式已保留，数据已清空`);
   };
-
-  // cloud modal
   $('#cloudBtn').onclick=()=>{
     $('#supaUrl').value=CLOUD.url; $('#supaKey').value=CLOUD.key;
     $('#cloudModal').classList.add('show');
@@ -475,8 +599,6 @@ function wireUI(){
     setSync('local','本地模式'); $('#cloudModal').classList.remove('show');
     toast('已断开云端');
   };
-
-  // keyboard nav
   document.addEventListener('keydown',e=>{
     if(!STATE.sel)return;
     if(document.querySelector('input.editor'))return;
