@@ -392,8 +392,8 @@ function renderBody(name,sh,layout){
   const hideEmptyRows = META[name].type==='pl' || META[name].type==='recon';
 
   // For user-managed list sheets (addRowButton:true), only show rows with data
-  // + DEFAULT_EMPTY_ROWS extra blank rows. The ➕ button adds more.
-  const DEFAULT_EMPTY_ROWS = 5;
+  // + 1 trailing empty row as input entry. The ➕ button adds more.
+  const DEFAULT_EMPTY_ROWS = 1;
   const isManagedList = !!layout.addRowButton;
 
   // First pass: determine which rows have data (so we know how many empties to append)
@@ -408,12 +408,18 @@ function renderBody(name,sh,layout){
       if(has) lastDataRow = r;
     }
   }
-  // Show: data rows + DEFAULT_EMPTY_ROWS extra empty rows.
-  // We may render beyond sh.lastRow (virtually) — those rows just have no rc data,
-  // they're still editable. The ➕ button physically expands sh.lastRow when clicked.
-  const renderUntil = isManagedList
-    ? Math.max(lastDataRow, start-1) + DEFAULT_EMPTY_ROWS
-    : sh.lastRow;
+  // For managed lists: render at least 1 empty row beyond the last data row.
+  // sh.lastRow grows with ➕, shrinks with −.
+  // On fresh load: lastRow=1 (header only), so we want at least row 2 to appear.
+  let renderUntil;
+  if(isManagedList){
+    const minEnd = Math.max(lastDataRow + DEFAULT_EMPTY_ROWS, start);
+    renderUntil = Math.max(sh.lastRow, minEnd);
+    // Sync sh.lastRow up if we're virtually extending — keeps ➕/− consistent
+    if(renderUntil > sh.lastRow) sh.lastRow = renderUntil;
+  } else {
+    renderUntil = sh.lastRow;
+  }
 
   // Count actual data rows for auto-serial
   let serialCounter = 0;
@@ -570,14 +576,11 @@ function renderCell(name,r,c,cell,layout,opts){
 function attachGridHandlers(){
   const tbody=$('#sheetWrap tbody');
   if(!tbody) return;
-  console.log('[DJJ] attachGridHandlers called, tbody found:', !!tbody);
 
   // Single click handler with clear priority
   tbody.addEventListener('click',e=>{
-    console.log('[DJJ click]', 'target=', e.target.tagName, e.target.className, 'id=', e.target.id);
     // 1. ➕ add row button
     if(e.target.closest('#btnAddRow')){
-      console.log('[DJJ] → matched ➕ button');
       e.preventDefault(); e.stopPropagation();
       insertRowAtEnd();
       return;
@@ -585,7 +588,6 @@ function attachGridHandlers(){
     // 2. − delete row button
     const delBtn = e.target.closest('.btn-delrow');
     if(delBtn){
-      console.log('[DJJ] → matched − button, r=', delBtn.dataset.r);
       e.preventDefault(); e.stopPropagation();
       const r = +delBtn.dataset.r;
       deleteRow(r);
@@ -594,13 +596,11 @@ function attachGridHandlers(){
     // 3. ignore footer-input clicks
     if(e.target.closest('input.finput')) return;
     // 4. find the td
-    const td=e.target.closest('td'); if(!td){console.log('[DJJ] → no td');return;}
-    console.log('[DJJ] → td class:', td.className, 'r=', td.dataset.r, 'c=', td.dataset.c);
-    if(td.closest('tr.addrow') || td.closest('tr.footer-row')){console.log('[DJJ] → addrow/footer-row ignored');return;}
-    if(td.classList.contains('rowctrl')){console.log('[DJJ] → rowctrl ignored');return;}
+    const td=e.target.closest('td'); if(!td) return;
+    if(td.closest('tr.addrow') || td.closest('tr.footer-row')) return;
+    if(td.classList.contains('rowctrl')) return;
     selectCell(td);
     if(td.classList.contains('dropdown') && td.classList.contains('editable')){
-      console.log('[DJJ] → dropdown editable, opening editor');
       beginEdit(td);
     }
   });
