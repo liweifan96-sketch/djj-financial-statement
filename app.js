@@ -570,11 +570,14 @@ function renderCell(name,r,c,cell,layout,opts){
 function attachGridHandlers(){
   const tbody=$('#sheetWrap tbody');
   if(!tbody) return;
+  console.log('[DJJ] attachGridHandlers called, tbody found:', !!tbody);
 
   // Single click handler with clear priority
   tbody.addEventListener('click',e=>{
+    console.log('[DJJ click]', 'target=', e.target.tagName, e.target.className, 'id=', e.target.id);
     // 1. ➕ add row button
     if(e.target.closest('#btnAddRow')){
+      console.log('[DJJ] → matched ➕ button');
       e.preventDefault(); e.stopPropagation();
       insertRowAtEnd();
       return;
@@ -582,36 +585,35 @@ function attachGridHandlers(){
     // 2. − delete row button
     const delBtn = e.target.closest('.btn-delrow');
     if(delBtn){
+      console.log('[DJJ] → matched − button, r=', delBtn.dataset.r);
       e.preventDefault(); e.stopPropagation();
       const r = +delBtn.dataset.r;
       deleteRow(r);
       return;
     }
-    // 3. ignore footer-input clicks (let the input handle it)
+    // 3. ignore footer-input clicks
     if(e.target.closest('input.finput')) return;
     // 4. find the td
-    const td=e.target.closest('td'); if(!td)return;
-    if(td.closest('tr.addrow') || td.closest('tr.footer-row')) return;
-    if(td.classList.contains('rowctrl')) return;
-    // 5. select first
+    const td=e.target.closest('td'); if(!td){console.log('[DJJ] → no td');return;}
+    console.log('[DJJ] → td class:', td.className, 'r=', td.dataset.r, 'c=', td.dataset.c);
+    if(td.closest('tr.addrow') || td.closest('tr.footer-row')){console.log('[DJJ] → addrow/footer-row ignored');return;}
+    if(td.classList.contains('rowctrl')){console.log('[DJJ] → rowctrl ignored');return;}
     selectCell(td);
-    // 6. dropdown cells: single click opens editor immediately
     if(td.classList.contains('dropdown') && td.classList.contains('editable')){
+      console.log('[DJJ] → dropdown editable, opening editor');
       beginEdit(td);
     }
   });
 
-  // Double-click for non-dropdown editable cells
   tbody.addEventListener('dblclick',e=>{
     const td=e.target.closest('td'); if(!td)return;
     if(td.closest('tr.addrow') || td.closest('tr.footer-row')) return;
     if(td.classList.contains('rowctrl')) return;
     if(!td.classList.contains('editable')) return;
-    if(td.classList.contains('dropdown')) return; // already handled on single click
+    if(td.classList.contains('dropdown')) return;
     beginEdit(td);
   });
 
-  // Footer input wiring
   tbody.querySelectorAll('input.finput').forEach(inp=>{
     inp.addEventListener('input',e=>{
       const k=e.target.dataset.key, v=e.target.value;
