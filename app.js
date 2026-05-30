@@ -427,13 +427,17 @@ function renderBody(name,sh,layout){
       const has = allCols.some(c => rc[c] || isMeaningful(name,r,c));
       if(!has){ const span=allCols.length+(isManagedList?1:0); html+=`<tr class="empty"><td colspan="${span}">&nbsp;</td></tr>`; continue; }
     }
-    // Determine whether to show a serial for this row: only if any non-auto cell has data
+    // Determine whether to show a serial for this row
     const nonAutoHasData = allCols.some(c=>{
       if(c===layout.autoSerialCol||c===layout.autoMonthCol) return false;
       return rc[c]!=null;
     });
     let rowSerial = null;
-    if(layout.autoSerialCol && nonAutoHasData){ serialCounter++; rowSerial = serialCounter; }
+    if(layout.autoSerialCol){
+      // In managed lists, show serial on every row (incl. empty placeholders).
+      // In non-managed sheets, only show serial on rows with data.
+      if(isManagedList || nonAutoHasData){ serialCounter++; rowSerial = serialCounter; }
+    }
 
     let rowCls='';
     const firstLabelCol = (layout.labelCols && layout.labelCols[0]) || 1;
@@ -566,35 +570,48 @@ function renderCell(name,r,c,cell,layout,opts){
 function attachGridHandlers(){
   const tbody=$('#sheetWrap tbody');
   if(!tbody) return;
+
+  // Single click handler with clear priority
   tbody.addEventListener('click',e=>{
-    // ➕ add row button
-    if(e.target.id==='btnAddRow' || e.target.closest('#btnAddRow')){
+    // 1. ➕ add row button
+    if(e.target.closest('#btnAddRow')){
+      e.preventDefault(); e.stopPropagation();
       insertRowAtEnd();
       return;
     }
-    // − delete row button
+    // 2. − delete row button
     const delBtn = e.target.closest('.btn-delrow');
     if(delBtn){
+      e.preventDefault(); e.stopPropagation();
       const r = +delBtn.dataset.r;
       deleteRow(r);
       return;
     }
+    // 3. ignore footer-input clicks (let the input handle it)
+    if(e.target.closest('input.finput')) return;
+    // 4. find the td
     const td=e.target.closest('td'); if(!td)return;
     if(td.closest('tr.addrow') || td.closest('tr.footer-row')) return;
     if(td.classList.contains('rowctrl')) return;
+    // 5. select first
     selectCell(td);
+    // 6. dropdown cells: single click opens editor immediately
+    if(td.classList.contains('dropdown') && td.classList.contains('editable')){
+      beginEdit(td);
+    }
   });
+
+  // Double-click for non-dropdown editable cells
   tbody.addEventListener('dblclick',e=>{
     const td=e.target.closest('td'); if(!td)return;
     if(td.closest('tr.addrow') || td.closest('tr.footer-row')) return;
     if(td.classList.contains('rowctrl')) return;
-    if(!td.classList.contains('editable'))return;
+    if(!td.classList.contains('editable')) return;
+    if(td.classList.contains('dropdown')) return; // already handled on single click
     beginEdit(td);
   });
-  tbody.addEventListener('click',e=>{
-    const td=e.target.closest('td');
-    if(td && td.classList.contains('dropdown') && td.classList.contains('editable')) beginEdit(td);
-  });
+
+  // Footer input wiring
   tbody.querySelectorAll('input.finput').forEach(inp=>{
     inp.addEventListener('input',e=>{
       const k=e.target.dataset.key, v=e.target.value;
