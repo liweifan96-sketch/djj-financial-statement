@@ -218,6 +218,25 @@ tr.addrow td{
 }
 .btn-addrow:hover{background:var(--accent-soft);border-style:solid}
 
+/* − delete-row control (leftmost narrow column, hover-revealed) */
+table.grid th.rowctrl, table.grid td.rowctrl{
+  width:24px;min-width:24px;max-width:24px;padding:0;
+  background:transparent;border-right:none;
+}
+table.grid td.rowctrl{position:relative}
+.btn-delrow{
+  position:absolute;top:50%;left:3px;transform:translateY(-50%);
+  width:18px;height:18px;border-radius:50%;border:1px solid var(--line);
+  background:#fff;color:var(--ink-faint);font-size:14px;line-height:1;
+  cursor:pointer;display:none;align-items:center;justify-content:center;
+  padding:0;transition:.12s;
+}
+tr.mgrow:hover .btn-delrow{display:flex}
+.btn-delrow:hover{border-color:var(--neg);color:var(--neg);background:#fff5f4}
+/* hide del button on non-empty rows (safety, also matches click handler protection) */
+tr.mgrow:not(.rowempty) .btn-delrow{opacity:.35}
+tr.mgrow:not(.rowempty) .btn-delrow:hover{background:#fff;cursor:not-allowed}
+
 /* footer row (statistics) */
 tr.footer-row td{
   background:#fbf6ea;border-top:2px solid var(--gold);
