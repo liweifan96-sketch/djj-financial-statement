@@ -178,21 +178,21 @@ window.DJJ_LAYOUTS = {
     columnNames: {
       1:'序号', 2:'月份', 3:'门店', 4:'对应报价单', 5:'机器型号', 6:'VIN',
       7:'销售', 8:'租期', 9:'租赁起始时间', 10:'最新进销存发票', 11:'状态',
-      12:'到期日', 13:'月租金', 14:'已收金额'
+      12:'到期日', 13:'月租金'
     },
-    hideCols: [15,16,17,18,19,20,21,22],   // 隐藏 剩余金额/备注/附加1-6
+    hideCols: [14,15,16,17,18,19,20,21,22],  // 隐藏 已收金额/剩余金额/备注/附加1-6
     dateCols: [9,12],
     labelCols: [4,5,6,7,8,10,11],
-    moneyCols: [13,14],
+    moneyCols: [13],
     autoSerialCol: 1,                       // 序号自动 1,2,3...
     autoMonthCol: 2,                        // 月份自动 = 当前月份
     dropdowns: { 3: ['悉尼','布里斯班','珀斯'] },
     addRowButton: true,                     // 显示 ➕ 在数据末尾插行
     footer: {                                // 底部合计行
       cells: {
-        4: { label: '本月统计', kind:'label' },                       // "本月统计" 放在 对应报价单 列
-        13: { kind:'auto', formula:'countNonEmpty', sourceCol:4, label:'本月销售单数' },  // 统计开了多少单
-        14: { kind:'input', label:'超3月单据数', placeholder:'手填' }
+        4: { kind:'label', label:'本月统计' },                       // "本月统计" 放在 对应报价单 列
+        12: { kind:'auto', formula:'countNonEmpty', sourceCol:4, label:'本月销售单数' },
+        13: { kind:'input', label:'超3月单据数', placeholder:'手填' }
       }
     },
     storeFilterCol: 3,
